@@ -1,4 +1,267 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>a means one</title><link>https://example.com/</link><description>Recent content on a means one</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Wed, 20 Oct 2021 00:00:00 +0000</lastBuildDate><atom:link href="https://example.com/index.xml" rel="self" type="application/rss+xml"/><item><title>CSAPP Archlab：优化流水线以提高分数</title><link>https://example.com/p/csapp-archlab-a-simple-solution/</link><pubDate>Sun, 17 Oct 2021 16:52:52 +0800</pubDate><guid>https://example.com/p/csapp-archlab-a-simple-solution/</guid><description>&lt;img src="https://example.com/p/csapp-archlab-a-simple-solution/2021-10-19_01-35.png" alt="Featured image of post CSAPP Archlab：优化流水线以提高分数" />&lt;h2 id="前言">前言&lt;/h2>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>a means one</title><link>https://example.com/</link><description>Recent content on a means one</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Thu, 28 Oct 2021 20:49:07 +0800</lastBuildDate><atom:link href="https://example.com/index.xml" rel="self" type="application/rss+xml"/><item><title>Linux Kernel: bzImage 文件结构和加载流程</title><link>https://example.com/p/linux-kernel-before-start_kernel/</link><pubDate>Thu, 28 Oct 2021 20:49:07 +0800</pubDate><guid>https://example.com/p/linux-kernel-before-start_kernel/</guid><description>&lt;img src="https://example.com/p/linux-kernel-before-start_kernel/21-10-31.jpg" alt="Featured image of post Linux Kernel: bzImage 文件结构和加载流程" />&lt;h2 id="前言">前言&lt;/h2>
+&lt;p>最近在尝试一探 Linux 内核的究竟，可以说是出师不利，在 &lt;code>start_kernel()&lt;/code> 这个公认的内核入口里频频受挫，茫茫然不知如何继续，索性先放一放，好在这几天也不是毫无收获，勉强弄懂了内核从被加载直到调用 &lt;code>start_kernel()&lt;/code> 的过程，拿来水一篇文章。&lt;/p>
+&lt;p>这篇文章分为两部分，用三个角度来检视 bzImage。其中前半部分我尽量用自己的语言介绍 bzImage，但不会深入；后半部分会顺着 Makefile 和 源码 来探究一些关键细节；三个角度分别是 文件的结构，内存中的布局，以及运行时与文件相关的执行和跳转代码。&lt;/p>
+&lt;h2 id="brief">brief&lt;/h2>
+&lt;p>bzImage 是编译 Linux 源码得到的最终文件，也就是一般意义上所说的 Linux 内核，一般它会被安装到 &lt;code>/boot&lt;/code> 文件夹内，开机时，由 bootloader 按照协议(&lt;a class="link" href="#%e7%9b%b8%e5%85%b3%e9%93%be%e6%8e%a5" >x86 boot protocol&lt;/a>)从硬盘中载入这个文件至内存中，接着跳转至指定位置，自此，bzImage 接管了这台机器，它作为内核开始运行。&lt;/p>
+&lt;h3 id="文件">文件&lt;/h3>
+&lt;p>一般编译成功后，bzImage 会是一个 PE 文件，PE 是 Windows 上的可执行文件类型，同时也是 UEFI 规范中的 EFI 文件格式，Linux 用这种方式实现了 EFI STUB 功能，可以直接通过 UEFI 启动 kernel，从而省去了 bootloader。&lt;/p>
+&lt;p>但这个功能和 bootloader 启动并不冲突，因为 UEFI 依赖 PE 文件头 的一些信息来跳转启动，而 bootloader 不依赖文件头，它依赖的信息在 0x200 的位置左右。&lt;/p>
+&lt;p>它的 PE 文件头是手动构造出来的，之所以手动构造，是因为 Linux 上没有什么能操作 PE 文件的工具，另一方面，手动构造也能精确控制其中的内容。&lt;/p>
+&lt;p>我们可以用 objdump 来简单输出它的部分信息。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-shell" data-lang="shell">$ objdump -fh arch/x86/boot/bzImage
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>尽管我们习惯说 “&lt;em>编译&lt;/em>” 内核，但 bzImage &lt;strong>不完全&lt;/strong>是编译出来的，真正编译出的内核主体部分是 vmlinux，这是一个 ELF 文件，可以在编译后的根目录找到，它是真正意义上的内核，开机过程结束后，运行在机器上的内核就是这个文件的内容，但它无法直接被启动，需要进行一系列初始化，我们将这些初始化代码分离出来，再将编译出的文件拼接在一起，构成了 bzImage。&lt;/p>
+&lt;p>具体来说，bzImage 由两个文件组成，第1部分是setup.bin，它的内容包括 boot sector 和 setup 代码，它会被载入某个低地址，第2部分是 vmlinux.bin ，它会被载入高地址，文档中约定在 0x100000 的位置。&lt;/p>
+&lt;p>&lt;strong>注意&lt;/strong>，vmlinux.bin &lt;strong>不是&lt;/strong> vmlinux，但它包含了 vmlinux。它由一系列初始化代码和 vmlinux 编译到一起的产物，它们会配置好机器，最后调用 vmlinux 中的 start_kernel 函数。&lt;/p>
+&lt;p>&lt;strong>注意&lt;/strong>，本文中会出现几个名称相近的文件，请注意区分。&lt;/p>
+&lt;h3 id="内存">内存&lt;/h3>
+&lt;p>Linux 的文档中规定了应如何载入这个文件，并提供了一些字段和功能，他们被记录在 &lt;a class="link" href="#%e7%9b%b8%e5%85%b3%e9%93%be%e6%8e%a5" >x86 boot protocol&lt;/a> 中。&lt;/p>
+&lt;p>前面提到 bzImage 是用两个文件拼接成的，bootloader 在将 bzImage 载入内存时，也会分别载入这两个部分。那么，bootloader 如何知道怎么分开并载入这两个部分（setup.bin 和 vmlinux.bin）呢？&lt;/p>
+&lt;p>答案在 &lt;a class="link" href="#%e7%9b%b8%e5%85%b3%e9%93%be%e6%8e%a5" >x86 boot protocol&lt;/a> 中。&lt;/p>
+&lt;blockquote>
+&lt;p>The 32-bit (non-real-mode) kernel starts at &lt;strong>offset (setup_sects+1) * 512 in the kernel file&lt;/strong> (again, if setup_sects == 0 the real value is 4.) It should be loaded at address 0x10000 for Image/zImage kernels and &lt;strong>0x100000 for bzImage kernels&lt;/strong>.&lt;/p>
+&lt;/blockquote>
+&lt;p>这段话里有两个重点，分别对应了文件和内存&lt;/p>
+&lt;ul>
+&lt;li>内核（vmlinux.bin）从文件（bzImage）中 (setup_sects+1) * 512 的位置开始&lt;/li>
+&lt;li>内核（vmlinux.bin）应被载入 0x100000 的位置&lt;/li>
+&lt;/ul>
+&lt;p>其中 setup_sects 是从 setup.bin 中读出的一个字段，它位于第一个扇区（前512字节）中的某个特定位置。当 bootloader 载入了 bzImage 的第一个扇区（也是 setup.bin 的第一个扇区）时，就能获得 setup_sects，在此它代表了 setup.bin 的剩余扇区数。&lt;/p>
+&lt;p>bootloader 用 setup_sects 确定了 setup.bin 的内容范围，剩下的部分就是 vmlinux.bin 了。接着，bootloader 把 setup.bin 载入至实模式下的某个低地址，把 vmlinux.bin 载入到 0x100000 的地址，其实代码里没有假定这个地址，但 &lt;a class="link" href="#%e7%9b%b8%e5%85%b3%e9%93%be%e6%8e%a5" >x86 boot protocol&lt;/a> 还是约定在这个位置。&lt;/p>
+&lt;h3 id="启动">启动&lt;/h3>
+&lt;p>在 &lt;a class="link" href="#%e7%9b%b8%e5%85%b3%e9%93%be%e6%8e%a5" >x86 boot protocol&lt;/a> 中，约定实模式下启动 bzImage 时应跳转至&lt;strong>段寄存器偏移&lt;/strong> 0x20 的位置，它指的就是内存偏移 0x200 的位置，从文件视角来看，内核入口就在文件头偏移 0x200 的位置，也就是第二个扇区。&lt;/p>
+&lt;p>实模式下的寻址为段寄存器左移4位加目标地址， &lt;code>$(seg) * 0x10 + $(addr)&lt;/code>，写作 &lt;code>$(seg):$(addr)&lt;/code>，若内核被载入至 0x90000，写作 9000:0000，那么内核入口就在 9020:0000 的位置，即 0x90200。&lt;/p>
+&lt;h2 id="before-descending">before descending&lt;/h2>
+&lt;p>上文是我尽可能简单地总结，而下面的内容基于源码，所以需要一定前置知识，结合官方文档 &lt;a class="link" href="#%e7%9b%b8%e5%85%b3%e9%93%be%e6%8e%a5" >x86 boot protocol&lt;/a> 也更容易理解。&lt;/p>
+&lt;p>另外，下文并不包括所有代码，很多地方一带而过，建议自己查阅源码，这里我做例子的版本是 &lt;a class="link" href="#%e7%9b%b8%e5%85%b3%e9%93%be%e6%8e%a5" >5.14.14&lt;/a>，我还建议自己编译一次来查看对应文件，一般编译命令如下&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-shell" data-lang="shell">$ make defconfig
+$ make bzImage
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>Linux 编译比较费时，在我的机器上，它耗时一小时左右，如果仅对本文的主题——文件结构——感兴趣，可以换下面的方式编译&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-shell" data-lang="shell">$ rm .config
+$ make tinyconfig
+$ make menuconfig
+$ make bzImage
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>先删除残留 .config，接着 &lt;code>make tinyconfig&lt;/code>，它仅配置最必要的功能，可以大大减少编译时间，但这是 32 位配置，下文用 64 位做例子，所以再用 &lt;code>make menuconfig&lt;/code>，把 &lt;code>64 bit kernel&lt;/code> 打上勾，保存退出，再编译 bzImage，此时仅需几分钟就能编译完成。&lt;/p>
+&lt;h3 id="前置知识">前置知识&lt;/h3>
+&lt;ul>
+&lt;li>C&lt;/li>
+&lt;li>汇编&lt;/li>
+&lt;li>链接脚本&lt;/li>
+&lt;li>Makefile&lt;/li>
+&lt;li>bash 及 bash 脚本&lt;/li>
+&lt;/ul>
+&lt;h3 id="相关链接">相关链接&lt;/h3>
+&lt;ul>
+&lt;li>&lt;a class="link" href="https://www.kernel.org/doc/html/latest/x86/boot.html" target="_blank" rel="noopener"
+>x86 boot protocol&lt;/a>&lt;/li>
+&lt;li>&lt;a class="link" href="https://www.gnu.org/software/make/manual/make.html" target="_blank" rel="noopener"
+>make&lt;/a>&lt;/li>
+&lt;li>&lt;a class="link" href="https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.14.14.tar.xz" target="_blank" rel="noopener"
+>linux kernel 5.14.14 源码&lt;/a>&lt;/li>
+&lt;/ul>
+&lt;h2 id="descending">descending&lt;/h2>
+&lt;p>Makefile 是一个挺神奇又挺麻烦的东西，我们可以轻松的找到最终 target，却要一点点逐级下降寻回它的依赖，好在这里层数不是很多，慢慢来。&lt;/p>
+&lt;h3 id="bzimage">bzImage&lt;/h3>
+&lt;p>我们在 &lt;code>arch/x86/boot/Makefile&lt;/code> 内找到这个 target。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">quiet_cmd_image&lt;/span> &lt;span class="o">=&lt;/span> BUILD &lt;span class="nv">$@&lt;/span>
+&lt;span class="nv">silent_redirect_image&lt;/span> &lt;span class="o">=&lt;/span> &amp;gt;/dev/null
+&lt;span class="nv">cmd_image&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/tools/build &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/setup.bin &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/vmlinux.bin &lt;span class="se">\
+&lt;/span>&lt;span class="se">&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/zoffset.h &lt;span class="nv">$@&lt;/span> &lt;span class="k">$($(&lt;/span>quiet&lt;span class="k">)&lt;/span>redirect_image&lt;span class="k">)&lt;/span>
+&lt;span class="nf">$(obj)/bzImage&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">obj&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">setup&lt;/span>.&lt;span class="n">bin&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">obj&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">vmlinux&lt;/span>.&lt;span class="n">bin&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">obj&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">tools&lt;/span>/&lt;span class="n">build&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,image&lt;span class="k">)&lt;/span>
+@&lt;span class="k">$(&lt;/span>kecho&lt;span class="k">)&lt;/span> &lt;span class="s1">&amp;#39;Kernel: $@ is ready&amp;#39;&lt;/span> &lt;span class="s1">&amp;#39; (#&amp;#39;&lt;/span>&lt;span class="sb">`&lt;/span>cat .version&lt;span class="sb">`&lt;/span>&lt;span class="s1">&amp;#39;)&amp;#39;&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>这里 &lt;code>if_changed&lt;/code> 是一个宏（或者函数），它定义在 &lt;code>scripts/Kbuild.include&lt;/code> 中，有兴趣可以去查看它的定义，这里可以简单理解为直接执行 &lt;code>cmd_$(1)&lt;/code> ，在这里就是 &lt;code>cmd_image&lt;/code>，它就定义在正上方。&lt;/p>
+&lt;p>bzImage 依赖于 setup.bin 及 vmlinux.bin，正如之前所说，它是由这两个文件拼接而成，而将它们拼接起来的就是 &lt;code>$(obj)/tools/build&lt;/code>。&lt;/p>
+&lt;p>&lt;code>$(obj)&lt;/code> 的来历比较麻烦，但它的内容很简单，它是当前 Makefile 的文件夹路径，在这里展开来就是 &lt;code>arch/x86/boot/tools/build&lt;/code>。&lt;/p>
+&lt;p>这个文件是由同目录下的同名源文件编译出的，它会将 setup.bin 和 vmlinux.bin 拼接在一起，生成 bzImage，并向其中填充一些内容——有一些信息我们无法提前获得，所以在 setup.bin 中预留了一些字段，由 build 填充进去。&lt;/p>
+&lt;p>zoffset.h 内就包含一部分需要被填充至 bzImage 的内容。这个 target 就定义在同一 Makefile 内，感兴趣可以自己看。&lt;/p>
+&lt;h3 id="setupbin">setup.bin&lt;/h3>
+&lt;p>这个 target 同样也定义在 &lt;code>arch/x86/boot/Makefile&lt;/code> 里，之所以强调一遍，是因为本文不只这一个 Makefile，避免混淆它们。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">OBJCOPYFLAGS_setup.bin&lt;/span> &lt;span class="o">:=&lt;/span> -O binary
+&lt;span class="nf">$(obj)/setup.bin&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">obj&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">setup&lt;/span>.&lt;span class="n">elf&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,objcopy&lt;span class="k">)&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>这里的 &lt;code>if_changed&lt;/code> 在上面见过，我们知道它会被展开为 &lt;code>cmd_objcopy&lt;/code>，但它却没有定义在附近，这是因为一些通用的工具都被封装进了 &lt;code>scripts/Makefile.lib&lt;/code> 中，其中 &lt;code>cmd_objcopy&lt;/code> 的定义如下&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">quiet_cmd_objcopy&lt;/span> &lt;span class="o">=&lt;/span> OBJCOPY &lt;span class="nv">$@&lt;/span>
+&lt;span class="nv">cmd_objcopy&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="k">$(&lt;/span>OBJCOPY&lt;span class="k">)&lt;/span> &lt;span class="k">$(&lt;/span>OBJCOPYFLAGS&lt;span class="k">)&lt;/span> &lt;span class="k">$(&lt;/span>OBJCOPYFLAGS_&lt;span class="k">$(&lt;/span>@F&lt;span class="k">))&lt;/span> $&amp;lt; &lt;span class="nv">$@&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>这里它会使用定义在前面的 &lt;code>OBJCOPYFLAGS_setup.bin&lt;/code>，把 &lt;code>cmd_objcopy&lt;/code> 展开来大概类似下面这样&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-shell" data-lang="shell">objcopy -O binary setup.elf setup.bin
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>&lt;code>objcopy -O binary&lt;/code> 会生成一个输入文件的 memory dump，就结果来说，它会丢掉输入文件的文件头，符号表重定位表等，只保留代码段数据段等内容。&lt;/p>
+&lt;p>在这里，它将 &lt;code>setup.elf&lt;/code> 中的文件头等等内容都删去，保存至 &lt;code>setup.bin&lt;/code> 中，此时，&lt;code>setup.bin&lt;/code> 中几乎完全是源码对应的内容，没有多余的文件头等等，再利用链接脚本，我们几乎可以控制这个文件中的每一个字节。&lt;/p>
+&lt;p>还记得吗，bzImage 是一个手动构造的 PE 文件，删去原有的 ELF 文件头，就是构造的第一步。&lt;/p>
+&lt;h3 id="setupelf">setup.elf&lt;/h3>
+&lt;p>&lt;code>$(obj)/setup.elf&lt;/code> 就定义在 &lt;code>$(obj)/setup.bin&lt;/code> 上面。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">LDFLAGS_setup.elf&lt;/span> &lt;span class="o">:=&lt;/span> -m elf_i386 -T
+&lt;span class="nf">$(obj)/setup.elf&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">src&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">setup&lt;/span>.&lt;span class="n">ld&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">SETUP_OBJS&lt;/span>&lt;span class="k">)&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,ld&lt;span class="k">)&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>&lt;code>cmd_ld&lt;/code> 和 &lt;code>cmd_objcopy&lt;/code> 一样定义在 &lt;code>scripts/Makefile.lib&lt;/code> 中。&lt;/p>
+&lt;p>&lt;code>SETUP_OBJS&lt;/code> 定义在文件内，包括了 &lt;code>arch/x86/boot&lt;/code> 下的大部分源文件（的同名目标文件），再加上 &lt;code>$(src)/setup.ld&lt;/code>，不难理解，这里是一条链接指令，将这个文件夹下的目标文件按照 setup.ld 的描述链接在一起。&lt;/p>
+&lt;p>setup.ld 中显式指定了段的位置和地址，由此来控制 setup.elf 中的文件内容，用来构造 PE 文件。&lt;/p>
+&lt;pre tabindex="0">&lt;code class="language-ld" data-lang="ld">SECTIONS
+{
+. = 0;
+.bstext : { *(.bstext) }
+.bsdata : { *(.bsdata) }
+. = 495;
+.header : { *(.header) }
+.entrytext : { *(.entrytext) }
+.......
+&lt;/code>&lt;/pre>&lt;p>其中 &lt;code>.bstext&lt;/code>，&lt;code>.bsdata&lt;/code>，&lt;code>.header&lt;/code>，&lt;code>.entrytext&lt;/code> 等都定义在 header.S 中。&lt;/p>
+&lt;p>header.S 用汇编一个字节一个字节地构造出了整个 PE 文件头和一些段信息，其中很多内容都初始化为0来留空，这是为了之后用 &lt;code>arch/x86/boot/tools/build&lt;/code> 来填充。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-S" data-lang="S"> &lt;span class="n">.code16&lt;/span>
+&lt;span class="n">.section&lt;/span> &lt;span class="s">&amp;#34;.bstext&amp;#34;&lt;/span>&lt;span class="p">,&lt;/span> &lt;span class="s">&amp;#34;ax&amp;#34;&lt;/span>
+&lt;span class="n">.global&lt;/span> &lt;span class="n">bootsect_start&lt;/span>
+&lt;span class="n">bootsect_start&lt;/span>&lt;span class="o">:&lt;/span>
+&lt;span class="c1">#ifdef CONFIG_EFI_STUB&lt;/span>
+&lt;span class="c1"># &amp;#34;MZ&amp;#34;, MS-DOS header&lt;/span>
+&lt;span class="n">.word&lt;/span> &lt;span class="n">MZ_MAGIC&lt;/span>
+&lt;span class="c1">#endif&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>它的第一个字节就是 PE 格式 魔数 MZ，可以看到它是一个可配置选项，不使用这个功能也不影响从 bootloader 启动。&lt;/p>
+&lt;p>&lt;code>header.S&lt;/code> 中还包括了一个重要的结构体 &lt;code>hdr&lt;/code>，包含了最终生成的文件的一些信息，里面的部分内容同样由 &lt;code>arch/x86/boot/tools/build&lt;/code> 填充，之前提到的 setup_sects 就在这个结构体中，build 会计算 setup.bin 的大小，往这个地址填入相应的值。&lt;/p>
+&lt;p>之前提到过，从 bootloader 启动时，会直接跳转至 0x200 的位置。&lt;code>header.S&lt;/code> 里有一行注释标明了这个位置。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-S" data-lang="S"> &lt;span class="c1"># offset 512, entry point&lt;/span>
+&lt;span class="n">.globl&lt;/span> &lt;span class="n">_start&lt;/span>
+&lt;span class="n">_start&lt;/span>&lt;span class="o">:&lt;/span>
+&lt;span class="c1"># Explicitly enter this as bytes, or the assembler&lt;/span>
+&lt;span class="c1"># tries to generate a 3-byte jump here, which causes&lt;/span>
+&lt;span class="c1"># everything else to push off to the wrong offset.&lt;/span>
+&lt;span class="n">.byte&lt;/span> &lt;span class="mh">0xeb&lt;/span> &lt;span class="c1"># short (2-byte) jump&lt;/span>
+&lt;span class="n">.byte&lt;/span> &lt;span class="n">start_of_setup&lt;/span>&lt;span class="m">-1&lt;/span>&lt;span class="n">f&lt;/span>
+&lt;span class="m">1&lt;/span>&lt;span class="o">:&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>这里没有用汇编代码，而是用写字节的方式构造了一个跳转指令，跳转到同文件的 &lt;code>start_of_setup&lt;/code> 处，&lt;code>start_of_setup&lt;/code> 最终执行 &lt;code>call main&lt;/code>，调用了 &lt;code>main&lt;/code> 函数。&lt;/p>
+&lt;p>&lt;code>main&lt;/code> 函数定义在 同文件夹内的 &lt;code>main.c&lt;/code> 中，它的最后一行会调用 &lt;code>go_to_protected_mode()&lt;/code>，它位于 &lt;code>pm.c&lt;/code>，最后一行同样是一个函数调用，不同的是，它有两个参数。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-c" data-lang="c"> &lt;span class="n">protected_mode_jump&lt;/span>&lt;span class="p">(&lt;/span>&lt;span class="n">boot_params&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="n">hdr&lt;/span>&lt;span class="p">.&lt;/span>&lt;span class="n">code32_start&lt;/span>&lt;span class="p">,&lt;/span>
+&lt;span class="p">(&lt;/span>&lt;span class="n">u32&lt;/span>&lt;span class="p">)&lt;/span>&lt;span class="o">&amp;amp;&lt;/span>&lt;span class="n">boot_params&lt;/span> &lt;span class="o">+&lt;/span> &lt;span class="p">(&lt;/span>&lt;span class="n">ds&lt;/span>&lt;span class="p">()&lt;/span> &lt;span class="o">&amp;lt;&amp;lt;&lt;/span> &lt;span class="mi">4&lt;/span>&lt;span class="p">));&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>&lt;code>code32_start&lt;/code> 处于 &lt;code>header.S&lt;/code>，是 &lt;code>hdr&lt;/code> 成员之一，在途中随着 &lt;code>hdr&lt;/code> 带进 &lt;code>boot_params&lt;/code> 中，它在 &lt;code>header.S&lt;/code> 中的定义为&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-S" data-lang="S">&lt;span class="n">code32_start&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="c1"># here loaders can put a different&lt;/span>
+&lt;span class="c1"># start address for 32-bit code.&lt;/span>
+&lt;span class="n">.long&lt;/span> &lt;span class="mh">0x100000&lt;/span> &lt;span class="c1"># 0x100000 = default for big kernel&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>第二个参数是 &lt;code>boot_params&lt;/code> 的真实地址，&lt;code>$(seg) * 0x10 + $(addr)&lt;/code>。&lt;/p>
+&lt;p>我们可以在 &lt;code>pmjump.S&lt;/code> 里找到 &lt;code>protected_mode_jump&lt;/code>，这里会开启保护模式并最终直接跳转至 &lt;code>code32_start&lt;/code> 的位置，也就是 0x100000。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-S" data-lang="S"> &lt;span class="n">jmpl&lt;/span> &lt;span class="o">*&lt;/span>%&lt;span class="n">eax&lt;/span> &lt;span class="c1"># Jump to the 32-bit entrypoint&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>还记得吗？0x100000，vmlinux.bin 就在这个地址，终于，我们从 setup.bin 跳转到了 vmlinux.bin 中。&lt;/p>
+&lt;h3 id="vmlinuxbin">vmlinux.bin&lt;/h3>
+&lt;p>&lt;code>vmlinux.bin&lt;/code> 在 makefile 中的定义如下&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">OBJCOPYFLAGS_vmlinux.bin&lt;/span> &lt;span class="o">:=&lt;/span> -O binary -R .note -R .comment -S
+&lt;span class="nf">$(obj)/vmlinux.bin&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">obj&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">compressed&lt;/span>/&lt;span class="n">vmlinux&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,objcopy&lt;span class="k">)&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>跟前面的 &lt;code>setup.bin&lt;/code> 非常相似，输出格式都是 binary，考虑到前一步，我们直接跳转到了 0x100000 的位置，也就是它的文件头部，显然它的文件头部是可执行的代码，所以我们不但要用 objcopy 删掉了它原有的文件头，还需要用链接脚把特定的代码固定在头部。&lt;/p>
+&lt;p>跟前面不同的是，这次操作的源文件是另一个目录下的文件 &lt;code>$(obj)/compressed/vmlinux&lt;/code>&lt;/p>
+&lt;h3 id="vmlinux">vmlinux&lt;/h3>
+&lt;p>&lt;strong>注意&lt;/strong>，这个 vmlinux &lt;strong>不是&lt;/strong> 根目录下的 vmlinux。&lt;/p>
+&lt;p>Makefile 本身对目录不敏感，所以这个 target 也定义在 &lt;code>arch/x86/boot/Makefile&lt;/code> 中，但它没有直接生成需要的文件，而是递归地调用了 make，来间接生成需要的文件。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nf">$(obj)/compressed/vmlinux&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>Q&lt;span class="k">)$(&lt;/span>MAKE&lt;span class="k">)&lt;/span> &lt;span class="k">$(&lt;/span>build&lt;span class="k">)&lt;/span>&lt;span class="o">=&lt;/span>&lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/compressed &lt;span class="nv">$@&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>&lt;code>$(MAKE) $(build)=xxx&lt;/code> 是 Linux 内核编译系统中常见的命令，用来在文件夹中逐级下降编译，这里不深入它的细节，直接打开 &lt;code>arch/x86/boot/compressed/Makefile&lt;/code>，找到需要的 target。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">vmlinux-objs-y&lt;/span> &lt;span class="o">:=&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/vmlinux.lds &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/kernel_info.o &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/head_&lt;span class="k">$(&lt;/span>BITS&lt;span class="k">)&lt;/span>.o &lt;span class="se">\
+&lt;/span>&lt;span class="se">&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/misc.o &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/string.o &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/cmdline.o &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/error.o &lt;span class="se">\
+&lt;/span>&lt;span class="se">&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/piggy.o &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/cpuflags.o
+&lt;span class="err">......&lt;/span>
+&lt;span class="nf">$(obj)/vmlinux&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">vmlinux&lt;/span>-&lt;span class="nv">objs&lt;/span>-&lt;span class="nv">y&lt;/span>&lt;span class="k">)&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">efi&lt;/span>-&lt;span class="nv">obj&lt;/span>-&lt;span class="nv">y&lt;/span>&lt;span class="k">)&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,ld&lt;span class="k">)&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>要注意这里的 &lt;code>$(obj)&lt;/code> 跟之前的 &lt;code>$(obj)&lt;/code> 已经是不同的内容了，它们分别是它们的当前目录，在这里它是 &lt;code>arch/x86/boot/compressed&lt;/code>。&lt;/p>
+&lt;p>这个目录下的 &lt;code>vmlinux&lt;/code> 是链接出的 ELF 文件，链接的文件大多是当前目录下的代码编译出的目标文件，其中三个比较特殊，&lt;code>vmlinux.lds&lt;/code> &lt;code>head_$(BITS).o&lt;/code> 和 &lt;code>piggy.o&lt;/code>。&lt;/p>
+&lt;h3 id="piggyo">piggy.o&lt;/h3>
+&lt;p>piggy.o 很有意思，虽然看起来它像是用代码编译出的目标文件，但它几乎不含哪怕一条代码，它包含了一整个可执行文件，也就是根目录下的 vmlinux，来看看它是如何做到的。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">quiet_cmd_mkpiggy&lt;/span> &lt;span class="o">=&lt;/span> MKPIGGY &lt;span class="nv">$@&lt;/span>
+&lt;span class="nv">cmd_mkpiggy&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/mkpiggy $&amp;lt; &amp;gt; &lt;span class="nv">$@&lt;/span>
+&lt;span class="nv">targets&lt;/span> &lt;span class="o">+=&lt;/span> piggy.S
+&lt;span class="nf">$(obj)/piggy.S&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">obj&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">vmlinux&lt;/span>.&lt;span class="n">bin&lt;/span>.&lt;span class="k">$(&lt;/span>&lt;span class="nv">suffix&lt;/span>-&lt;span class="nv">y&lt;/span>&lt;span class="k">)&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">obj&lt;/span>&lt;span class="k">)&lt;/span>/&lt;span class="n">mkpiggy&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,mkpiggy&lt;span class="k">)&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>piggy.o 是由 piggy.S 编译出的文件，但 piggy.S 不是一个提前写好的汇编文件，它是用 &lt;code>$(obj)/mkpiggy&lt;/code> 自动生成的，piggy.S 的另一个依赖，&lt;code>$(obj)/vmlinux.bin.$(suffix-y)&lt;/code> 是一个压缩文件，它根据配置决定选择哪种压缩工具和算法。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">vmlinux.bin.all-y&lt;/span> &lt;span class="o">:=&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/vmlinux.bin
+&lt;span class="nv">vmlinux.bin.all-$(CONFIG_X86_NEED_RELOCS)&lt;/span> &lt;span class="o">+=&lt;/span> &lt;span class="k">$(&lt;/span>obj&lt;span class="k">)&lt;/span>/vmlinux.relocs
+&lt;span class="nf">$(obj)/vmlinux.bin.gz&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">vmlinux&lt;/span>.&lt;span class="nv">bin&lt;/span>.&lt;span class="nv">all&lt;/span>-&lt;span class="nv">y&lt;/span>&lt;span class="k">)&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,gzip&lt;span class="k">)&lt;/span>
+&lt;span class="err">......&lt;/span>
+&lt;span class="nf">$(obj)/vmlinux.bin.zst&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="k">$(&lt;/span>&lt;span class="nv">vmlinux&lt;/span>.&lt;span class="nv">bin&lt;/span>.&lt;span class="nv">all&lt;/span>-&lt;span class="nv">y&lt;/span>&lt;span class="k">)&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,zstd22&lt;span class="k">)&lt;/span>
+&lt;span class="nv">suffix-$(CONFIG_KERNEL_GZIP)&lt;/span> &lt;span class="o">:=&lt;/span> gz
+&lt;span class="err">......&lt;/span>
+&lt;span class="nv">suffix-$(CONFIG_KERNEL_ZSTD)&lt;/span> &lt;span class="o">:=&lt;/span> zst
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>不论哪种工具，它们要压缩的文件是同一个 &lt;code>$(obj)/vmlinux.bin&lt;/code>。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-makefile" data-lang="makefile">&lt;span class="nv">OBJCOPYFLAGS_vmlinux.bin&lt;/span> &lt;span class="o">:=&lt;/span> -R .comment -S
+&lt;span class="nf">$(obj)/vmlinux.bin&lt;/span>&lt;span class="o">:&lt;/span> &lt;span class="n">vmlinux&lt;/span> &lt;span class="n">FORCE&lt;/span>
+&lt;span class="k">$(&lt;/span>call if_changed,objcopy&lt;span class="k">)&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>&lt;strong>注意&lt;/strong>，这里的 &lt;code>$(obj)/vmlinux.bin&lt;/code> 是 &lt;code>arch/x86/boot/compressed/vmlinux.bin&lt;/code>，而非之前的 &lt;code>arch/x86/boot/vmlinux.bin&lt;/code>；&lt;/p>
+&lt;p>&lt;strong>注意&lt;/strong>，这里的 &lt;code>vmlinux&lt;/code>，是根目录下的 &lt;code>vmlinux&lt;/code>，也非刚刚的 &lt;code>arch/x86/boot/compressed/vmlinux&lt;/code>。&lt;/p>
+&lt;p>这里的 objcopy 不再直接输出 binary 了，它仅对 内核文件 进行了 strip，保留了一个完整的 ELF 文件格式。&lt;/p>
+&lt;p>可以说，当前目录下的 vmlinux.bin 和 根目录下的 vmlinux 基本是同一个东西没啥变化。而当前目录下的 vmlinux 却和根目录下的 vmlinux 完全不同，&lt;/p>
+&lt;p>再来看 piggy.S，它直接包含了这个压缩后的内核，可以预见，编译后的 piggy.o，包含了一个 &lt;code>.rodata..compressed&lt;/code> 的段，这个段是一个完整的压缩后的内核。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-S" data-lang="S">&lt;span class="n">.section&lt;/span> &lt;span class="s">&amp;#34;.rodata..compressed&amp;#34;&lt;/span>&lt;span class="p">,&lt;/span>&lt;span class="s">&amp;#34;a&amp;#34;&lt;/span>&lt;span class="p">,&lt;/span>&lt;span class="o">@&lt;/span>&lt;span class="n">progbits&lt;/span>
+&lt;span class="n">.globl&lt;/span> &lt;span class="n">z_input_len&lt;/span>
+&lt;span class="n">z_input_len&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="m">9905201&lt;/span>
+&lt;span class="n">.globl&lt;/span> &lt;span class="n">z_output_len&lt;/span>
+&lt;span class="n">z_output_len&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="m">36765532&lt;/span>
+&lt;span class="n">.globl&lt;/span> &lt;span class="n">input_data&lt;/span>&lt;span class="p">,&lt;/span> &lt;span class="n">input_data_end&lt;/span>
+&lt;span class="n">input_data&lt;/span>&lt;span class="o">:&lt;/span>
+&lt;span class="n">.incbin&lt;/span> &lt;span class="s">&amp;#34;arch/x86/boot/compressed/vmlinux.bin.gz&amp;#34;&lt;/span>
+&lt;span class="n">input_data_end&lt;/span>&lt;span class="o">:&lt;/span>
+&lt;span class="n">.section&lt;/span> &lt;span class="s">&amp;#34;.rodata&amp;#34;&lt;/span>&lt;span class="p">,&lt;/span>&lt;span class="s">&amp;#34;a&amp;#34;&lt;/span>&lt;span class="p">,&lt;/span>&lt;span class="o">@&lt;/span>&lt;span class="n">progbits&lt;/span>
+&lt;span class="n">.globl&lt;/span> &lt;span class="n">input_len&lt;/span>
+&lt;span class="n">input_len&lt;/span>&lt;span class="o">:&lt;/span>
+&lt;span class="n">.long&lt;/span> &lt;span class="m">9905201&lt;/span>
+&lt;span class="n">.globl&lt;/span> &lt;span class="n">output_len&lt;/span>
+&lt;span class="n">output_len&lt;/span>&lt;span class="o">:&lt;/span>
+&lt;span class="n">.long&lt;/span> &lt;span class="m">36765532&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>这里用 &lt;code>input_data&lt;/code> 和 &lt;code>input_data_end&lt;/code> 标明了 这个压缩后的内核的起始地址和结束地址。&lt;/p>
+&lt;p>现在，我们知道了真正的内核究竟被塞进了哪里，也知道了如何在内存中找到它，剩下两个问题，1，它是个压缩文件，我们不可能直接执行压缩文件；2，它是个 ELF 文件，我们也不能直接在开机前的环境下直接运行 ELF。&lt;/p>
+&lt;h3 id="vmlinuxlds">vmlinux.lds&lt;/h3>
+&lt;p>&lt;code>vmlinux.lds&lt;/code> 是一个 ld 文件，它由 &lt;code>vmlinux.ld.S&lt;/code> 经过预处理生成，跟之前一样，它显式指定了段的位置，再加上前面提到的 &lt;code>objdump -O binary&lt;/code>，可以知道，这里放在开头的内容，就是 vmlinux.bin 的头部内容，也是 0x100000 地址的内容。&lt;/p>
+&lt;pre tabindex="0">&lt;code class="language-ld" data-lang="ld">SECTIONS
+{
+......
+/* Text and read-only data */
+.text : AT(ADDR(.text) - LOAD_OFFSET) {
+_text = .;
+_stext = .;
+/* bootstrapping code */
+HEAD_TEXT
+TEXT_TEXT
+&lt;/code>&lt;/pre>&lt;p>这里 &lt;code>HEAD_TEXT&lt;/code> 处于同目录下的 head_64.S 中，更具体一点，是该文件中的 &lt;code>__HEAD&lt;/code>，他们在展开后都是 &lt;code>.head.text&lt;/code>。&lt;/p>
+&lt;h3 id="head_64o">head_64.o&lt;/h3>
+&lt;p>head_64.S 有近千行，里面是成吨的架构相关细节，但我们不关心这些细节，我们只关心文件在内存中的结构。&lt;/p>
+&lt;p>虽然这一节的标题是 head_64.o，但 它 仅仅是个入口，它和 arch/x86/boot/compressed 目录下的代码一起完成了很多架构相关的工作，但我们仅关心一个东西——文件。&lt;/p>
+&lt;p>我们知道 0x100000 的地址上是 vmlinux.bin，它包含了 arch/x86/boot/compressed 目录下的代码 以及压缩后的内核文件，在跳转到这里后，它会把这个压缩后的内核复制到一个“安全”的地方，然后解压出其中的 ELF 文件，最后把 ELF 中的程序段安置在对应地址上。&lt;/p>
+&lt;h4 id="复制">复制&lt;/h4>
+&lt;p>head_64.S 代码中有这么一段&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-S" data-lang="S">&lt;span class="o">/*&lt;/span>
+&lt;span class="o">*&lt;/span> &lt;span class="n">Copy&lt;/span> &lt;span class="n">the&lt;/span> &lt;span class="n">compressed&lt;/span> &lt;span class="n">kernel&lt;/span> &lt;span class="n">to&lt;/span> &lt;span class="n">the&lt;/span> &lt;span class="n">end&lt;/span> &lt;span class="n">of&lt;/span> &lt;span class="n">our&lt;/span> &lt;span class="n">buffer&lt;/span>
+&lt;span class="o">*&lt;/span> &lt;span class="n">where&lt;/span> &lt;span class="n">decompression&lt;/span> &lt;span class="n">in&lt;/span> &lt;span class="n">place&lt;/span> &lt;span class="n">becomes&lt;/span> &lt;span class="n">safe.&lt;/span>
+&lt;span class="o">*/&lt;/span>
+&lt;span class="n">pushq&lt;/span> &lt;span class="o">%rsi
+&lt;/span>&lt;span class="o"> leaq (_bss-8)(%&lt;/span>&lt;span class="n">rip&lt;/span>&lt;span class="p">),&lt;/span> &lt;span class="o">%rsi
+&lt;/span>&lt;span class="o"> leaq rva(_bss-8)(%&lt;/span>&lt;span class="n">rbx&lt;/span>&lt;span class="p">),&lt;/span> &lt;span class="o">%rdi
+&lt;/span>&lt;span class="o"> movl $(_bss - startup_32), %&lt;/span>&lt;span class="n">ecx&lt;/span>
+&lt;span class="n">shrl&lt;/span> &lt;span class="o">$&lt;/span>&lt;span class="m">3&lt;/span>&lt;span class="p">,&lt;/span> &lt;span class="o">%ecx
+&lt;/span>&lt;span class="o"> std
+&lt;/span>&lt;span class="o"> rep movsq
+&lt;/span>&lt;span class="o"> cld
+&lt;/span>&lt;span class="o"> popq %&lt;/span>&lt;span class="n">rsi&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>这里，会把内存中从 &lt;code>startup_32&lt;/code> 至 &lt;code>_bss&lt;/code> 的内容复制到 &lt;code>%rbx&lt;/code> 指向的位置，其中 &lt;code>startup_32&lt;/code> 就定义在这个文件最开始，跟 &lt;code>__HEAD&lt;/code> 同一个位置，也就是 vmlinux.bin 的开始，&lt;code>_bss&lt;/code> 指的是 vmlinux.ld.S 中的 &lt;code>.bss&lt;/code> 段。&lt;/p>
+&lt;p>这一段内存，几乎就是 vmlinux.bin 的所有内容，所以我们把 vmlinux.bin 从 0x100000 复制到了 &lt;code>%rbx&lt;/code> 指向的位置，但是为什么？&lt;/p>
+&lt;p>不久前我们把 vmlinux 压缩进了 piggy.o，现在我们希望将它解压出来。&lt;/p>
+&lt;p>如果仅仅是这样，或许用不着这么麻烦，这里要做的是 &lt;strong>就地解压&lt;/strong>，具体一点说，我们要将它解压到 0x100000 的地址上，就是当前 vmlinux.bin 所在的位置。&lt;/p>
+&lt;p>如果不做任何准备，任谁都能想象到，解压出的内容会立刻覆盖原有内容，而且，因为是解压，在大多数情况下，解压出的数据都比解压前的更大，解压出的数据会立刻破坏掉未解压的数据甚至代码，让解压几乎不可能完成。&lt;/p>
+&lt;p>所以我们将 vmlinux 的内容复制到后面某个位置，在 0x100000 这个地址留出足够的空间，这样就能顺利完成解压过程。&lt;/p>
+&lt;h4 id="解压-和-重定位">解压 和 重定位&lt;/h4>
+&lt;p>复制代码下方不远处，就是解压的代码，它调用了 extract_kernel，这个函数定义在 misc.c 中。&lt;/p>
+&lt;p>尽管这个函数叫 extract_kernel，但它不仅只解压了内核，还将这个 EFI 文件中的各个程序段挪到相应位置，还顺便处理了重定位，从这个函数返回后，我们又有一个 jmp。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-S" data-lang="S">&lt;span class="o">/*&lt;/span>
+&lt;span class="o">*&lt;/span> &lt;span class="n">Jump&lt;/span> &lt;span class="n">to&lt;/span> &lt;span class="n">the&lt;/span> &lt;span class="n">decompressed&lt;/span> &lt;span class="n">kernel.&lt;/span>
+&lt;span class="o">*/&lt;/span>
+&lt;span class="n">jmp&lt;/span> &lt;span class="o">*&lt;/span>%&lt;span class="n">rax&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;p>这次跳转的地址依然是 0x100000，因为刚刚在挪程序段时，就是以 0x100000 为基准依次复制的，vmlinux 中的第一个程序段就放在这个地址上，所以几乎能确信它一定使用了链接脚本来指定程序段的内容。&lt;/p>
+&lt;p>这个链接脚本就是 arch/kernel/vmlinux.ld.S&lt;/p>
+&lt;h3 id="archx86kernel">arch/x86/kernel/&lt;/h3>
+&lt;p>尽管我们现在还没到 start_kernel，但确实脱离了那些外部代码，真正进入了 vmlinux 之中，但 vmlinux 在解压后又立刻被其中的程序段覆盖，文件的结构不复存在，只剩下程序段安置在对应的内存里，本文的主题也基本到此为止，只剩下顺着代码跳转到 start_kernel 了。&lt;/p>
+&lt;p>这里的 vmlinux.ld.S 充满着即视感，它跟 arch/x86/boot/compressed/vmlinux.ld.S 非常像，第一个代码段同样是 &lt;code>HEAD_TEXT&lt;/code>，对应的就是这个目录下的 head_64.S。&lt;/p>
+&lt;p>在 head_64.S 中，我们最终会跳转到 &lt;code>x86_64_start_kernel&lt;/code>，在 head_64.c 中，这个函数最后会调用 &lt;code>x86_64_start_reservations(real_mode_data)&lt;/code>，接着，就是最后的最后，&lt;code>start_kernel()&lt;/code>。&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" class="chroma">&lt;code class="language-c" data-lang="c">&lt;span class="kt">void&lt;/span> &lt;span class="n">__init&lt;/span> &lt;span class="nf">x86_64_start_reservations&lt;/span>&lt;span class="p">(&lt;/span>&lt;span class="kt">char&lt;/span> &lt;span class="o">*&lt;/span>&lt;span class="n">real_mode_data&lt;/span>&lt;span class="p">)&lt;/span>
+&lt;span class="p">{&lt;/span>
+&lt;span class="p">......&lt;/span>
+&lt;span class="n">start_kernel&lt;/span>&lt;span class="p">();&lt;/span>
+&lt;span class="p">}&lt;/span>
+&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="结语">结语&lt;/h2>
+&lt;p>我没有想到，还没有深入 vmlinux，仅仅外围的代码都让我这么焦头烂额，一方面，这些代码不论是量还是难度都比我想象地更大，我应该再检讨一下自己读代码的思路，不该追求每一行都看懂；另一方面，写作向来不是我的强项，哪怕是技术向的文章都能写得这么痛苦，通篇干瘪无力，事后读来都是一种折磨。不知道我还能否坚持下去，习惯和放弃，也不知哪个先到。&lt;/p></description></item><item><title>CSAPP Archlab：优化流水线以提高分数</title><link>https://example.com/p/csapp-archlab-a-simple-solution/</link><pubDate>Sun, 17 Oct 2021 16:52:52 +0800</pubDate><guid>https://example.com/p/csapp-archlab-a-simple-solution/</guid><description>&lt;img src="https://example.com/p/csapp-archlab-a-simple-solution/2021-10-19_01-35.png" alt="Featured image of post CSAPP Archlab：优化流水线以提高分数" />&lt;h2 id="前言">前言&lt;/h2>
 &lt;p>这已经是我第N次尝试搞博客了，但每次都没能继续下去，要说原因，网络上的东西也太多了，我能想到的问题基本都能在网上找到答案。我自己也始终是一个学习者的心态，学了一些东西，却很少产出，连代码都很少写，之前的博客也就难以为继。这一次又想记录点东西，于是就盯上前段时间做过的 CSAPP 实验。&lt;/p>
 &lt;h2 id="关于-arch-lab">关于 Arch Lab&lt;/h2>
 &lt;h3 id="why-arch-lab">Why Arch Lab&lt;/h3>
